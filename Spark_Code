@@ -1,0 +1,102 @@
+query = spark.sql("""drop table if exists workspace_x206399.PIP_HIST_SHORT""").show()
+
+query = spark.sql("""CREATE TABLE if not exists workspace_x206399.PIP_HIST_SHORT
+AS
+SELECT bap_bus_bacct_num, prod_instnc_resrc_str, load_dt_part
+FROM CUST_CUST.PRODUCT_INSTANCE_PROFL_HIST_ORC A
+where load_dt_part between '2017-10-01' and '2017-10-31'
+      AND BAP_BUS_BACCT_NUM_SRC_ID = 130 
+      AND BAP_BILLG_ACCT_TYP_CD = 'I'
+      AND BAP_BILLG_ACCT_SUBTYP_CD = 'R'""")                
+## Have to Change WHERE Clause every time I run the query for new Month                      
+
+
+## Get the New Activation Subs
+
+query = spark.sql("""drop view if exists workspace_x206399.new_activations""").show()
+
+query = spark.sql("""create view if not exists workspace_x206399.new_activations
+as
+SELECT BAN, Sub_phone_num, sub_activation_dt,
+       CASE When price_plan_nm like '%Tab%' then 'Tablet'
+            When price_plan_nm like '%Drive%' then 'Drive+'
+            When price_plan_nm like '%Watch%' or price_plan_nm like '%Smartwatch%'  then 'Smart Watch'
+            When price_plan_nm like '%Hub%' then 'Smart Hub'
+            When price_plan_nm like '%Home Phone%' then 'Wireless Home Phone'
+            When price_plan_nm like '%Mobile High Speed%' or price_plan_nm like '%MHS%'  then 'MHSI'
+            else 'PCS Phone (Voice Line)'
+       END  as Price_Plan_Group
+FROM workspace_x206399.wls_Analytics_hist_orc_oct 
+where  brand = 'TELUS'  and billing_method = 'Postpaid' and acct_type='Individual' and acct_sub_type = 'Residential'
+and sub_activation_dt between '2017-10-01' and '2017-10-30'""").show()
+## Have to Change FROM Clause every time
+
+
+
+query = spark.sql("""drop table if exists workspace_x206399.bap_tmp""")
+
+query = spark.sql("""create table if not exists workspace_x206399.bap_tmp 
+       as
+       select ac.ban, pip.load_dt_part, ac.sub_activation_dt, 
+       count(distinct pip.prod_instnc_resrc_str) as active_subs
+       from workspace_x206399.new_activations ac
+            left join workspace_x206399.PIP_HIST_SHORT pip
+            on ac.ban = pip.bap_bus_bacct_num   
+       where datediff(string(ac.sub_activation_dt), string(pip.load_dt_part)) < 2 
+             and datediff(string(ac.sub_activation_dt), string(pip.load_dt_part)) > -1 
+       group by ac.ban, pip.load_dt_part, ac.sub_activation_dt""")
+
+## Identifying New Connection Subs
+
+query = spark.sql("""drop table IF EXISTS workspace_x206399.new_conn_tmp""")
+
+query = spark.sql("""create table IF NOT EXISTS workspace_x206399.new_conn_tmp as 
+select ban,'New Connection' as activation_type
+from workspace_x206399.bap_tmp
+group by ban having count(*)=1""")
+
+query = spark.sql("""drop table IF EXISTS workspace_x206399.new_activation_subs_tmp""")
+
+query = spark.sql("""Create Table if not exists workspace_x206399.new_activation_subs_tmp 
+as
+select a.ban, a.sub_phone_num,a.sub_activation_dt, a.price_plan_group, b.activation_type 
+from workspace_x206399.new_activations a 
+     join workspace_x206399.new_conn_tmp b 
+     on a.ban=b.ban""") 
+
+
+## Identifying AAL, Number Change Subs
+
+query = spark.sql("""drop table IF EXISTS workspace_x206399.bap_tmp_transposed""")
+
+query = spark.sql("""Create table if not exists workspace_x206399.bap_tmp_transposed
+as
+select A.ban, A.sub_activation_dt, A.active_subs prev_subs, B.active_subs new_subs 
+from
+workspace_x206399.bap_tmp A 
+left join workspace_x206399.bap_tmp B
+on A.ban = B.ban and A.sub_activation_dt = B.sub_activation_dt 
+Where A.load_dt_part < B.load_dt_part""")
+
+query = spark.sql("""drop table IF EXISTS workspace_x206399.aal_change_tmp""")
+
+query = spark.sql("""Create table if not exists workspace_x206399.aal_change_tmp
+as
+select ban, sub_activation_dt, 
+       CASE when prev_subs = new_subs then 'Number Change' Else 'AAL' END activation_type
+From workspace_x206399.bap_tmp_transposed""")
+
+query = spark.sql("""Insert into workspace_x206399.new_activation_subs_tmp 
+select a.ban, a.sub_phone_num,a.sub_activation_dt, a.price_plan_group, b.activation_type 
+from workspace_x206399.new_activations a 
+     join workspace_x206399.aal_change_tmp b 
+     on a.ban=b.ban and a.sub_activation_dt = b.sub_activation_dt""")
+
+
+ 
+## Inserting the New Activation Subs for the current month into the main Table repository    
+
+query = spark.sql("""Create Table if not exists workspace_x206399.new_activations_all 
+as
+select *
+from workspace_x206399.new_activation_subs_tmp""")
